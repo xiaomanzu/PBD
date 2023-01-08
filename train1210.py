@@ -23,11 +23,11 @@ import sys
 from resnet import *
 from transformer import *
 from DANN import *
-from utils.utils_algo import *
-from utils.utils_loss import partial_loss, SupConLoss
-from utils.PACS import load_PACS
-from utils.VLCS import get_vacs_domain
-from utils.seed import *
+from utils_algo import *
+from utils_loss import partial_loss, SupConLoss
+# from utils.PACS import load_PACS
+# from utils.VLCS import get_vacs_domain
+from eeg_seed import *
 # from pathos.multiprocessing import ProcessingPool as Pool
 torch.backends.cudnn.benchmark=False
 #RUN:
@@ -83,7 +83,7 @@ parser.add_argument('--dist-url', default='tcp://localhost:10003', type=str,
 parser.add_argument('--dist-backend', default='gloo', type=str,
                     help='distributed backend')
 parser.add_argument('--seed', default=123, type=int,
-                    help='seed for initializing training. ')
+                    help='seed for initializing training. ')#123
 parser.add_argument('--gpu', default=0, type=int,
                     help='GPU id to use.')
 parser.add_argument('--multiprocessing-distributed', default=True,
@@ -93,8 +93,8 @@ parser.add_argument('--multiprocessing-distributed', default=True,
                          'multi node data parallel training')
 parser.add_argument('--num-class', default=3, type=int,
                     help='number of class')
-parser.add_argument('--not-pbd',action="store_true",
-                    help='if not use pbd-')
+parser.add_argument('--not-pbd',default=False,
+                    help='if not use pbd-')#action="store_true",
 parser.add_argument('--domain-class', default=14, type=int,
                     help='number of domain')
 parser.add_argument('--low-dim', default=128, type=int,
@@ -105,8 +105,8 @@ parser.add_argument('--moco_m', default=0.999, type=float,
                     help='momentum for updating momentum encoder')
 parser.add_argument('--proto_m', default=0.99, type=float,
                     help='momentum for computing the momving average of prototypes')
-parser.add_argument('--loss_weight', default=0.5, type=float,
-                    help='contrastive loss weight')
+parser.add_argument('--loss_weight', nargs='+', type=float,
+                    help='contrastive loss weight')#default=0.5,
 parser.add_argument('--conf_ema_range', default='0.95,0.8', type=str,
                     help='pseudo target updating coefficient (phi)')
 parser.add_argument('--prot_start', default=1, type=int,
@@ -201,12 +201,15 @@ def main_worker(gpu, ngpus_per_node, args):
     print("=> creating model '{}'".format(args.arch))
     if args.dataset == "SEED":
         # model = PiCO(args, SupConTransformer)
-        model = PiCO(args, SupConDANN)
-        # model_vanilla,dim_in = model_dict['resnet18']
-        model_vanilla = SupConTransformer()
+        if not args.not_pbd:
+            model = PiCO(args, SupConDANN)
+        else:
+            model = SupConDANN()
     else:
-        model = PiCO(args, SupConResNet)
-        model_vanilla = resnet18()
+        if not args.not_pbd:
+            model = PiCO(args, SupConResNet)
+        else:
+            model = resnet18()
 
 
 
@@ -217,7 +220,6 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.gpu is not None:
             torch.cuda.set_device(args.gpu)
             model.cuda(args.gpu)
-            model_vanilla.cuda()
             # When using a single GPU per process and per
             # DistributedDataParallel, we need to divide the batch size
             # ourselves based on the total number of GPUs we have
@@ -226,7 +228,6 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
             model.cuda()
-            model_vanilla.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
             model = torch.nn.parallel.DistributedDataParallel(model)
@@ -241,12 +242,7 @@ def main_worker(gpu, ngpus_per_node, args):
         raise NotImplementedError("Only DistributedDataParallel is supported.")
 
     # set optimizer
-    if args.not_pbd:
-        optimizer = torch.optim.AdamW(model_vanilla.parameters(), args.lr
-                                )#momentum=args.momentum,
-                               # weight_decay=args.weight_decay
-    else:
-        optimizer = torch.optim.AdamW(model.parameters(), args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), args.lr)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -297,39 +293,33 @@ def main_worker(gpu, ngpus_per_node, args):
 
     best_acc = 0
     mmc = 0 #mean max confidence
+
+    print('Calculating uniform targets...')
+    if args.not_pbd:
+        vanilla_fn = nn.CrossEntropyLoss()
+        train_vanilla(train_loader, model, vanilla_fn, optimizer, epoch)
+    else:
+        tempY = train_givenY.sum(dim=1).unsqueeze(1).repeat(1, train_givenY.shape[1])
+        confidence = train_givenY.float() / tempY
+        confidence = confidence.cuda()
+        loss_fn = partial_loss(confidence)
+        loss_cont_fn = SupConLoss(domain_number=args.domain_class)
+        loss_domain_fn = nn.CrossEntropyLoss()
+
     for epoch in range(args.start_epoch, args.epochs):
         is_best = False
         start_upd_prot = epoch>=args.prot_start
-
-
         adjust_learning_rate(args, optimizer, epoch)
-
         import gc
-
         gc.collect()
         torch.cuda.empty_cache()
-        if args.not_pbd:
-            loss_domain_fn = nn.CrossEntropyLoss()
-            vanilla_fn = nn.CrossEntropyLoss()
-            train_vanilla(train_loader,model_vanilla,vanilla_fn, optimizer,  epoch)
-        else:
-            print('Calculating uniform targets...')
-            tempY = train_givenY.sum(dim=1).unsqueeze(1).repeat(1, train_givenY.shape[1])
-            confidence = train_givenY.float() / tempY
-            # print('confidence.shape=',confidence.shape)
-            confidence = confidence.cuda()
-            # calculate confidence
+        if args.distributed:
+            train_sampler.set_epoch(epoch)
+        train(train_loader, model, loss_fn, loss_cont_fn,loss_domain_fn, optimizer,  epoch, args, logger, start_upd_prot)
+        loss_fn.set_conf_ema_m(epoch, args)
+        mmc = loss_fn.confidence.max(dim=1)[0].mean()
 
-            loss_fn = partial_loss(confidence)
-            loss_cont_fn = SupConLoss(domain_number=args.domain_class)
-            if args.distributed:
-                train_sampler.set_epoch(epoch)
-            train(train_loader, model, loss_fn, loss_cont_fn,loss_domain_fn, optimizer,  epoch, args, logger, start_upd_prot)
-            loss_fn.set_conf_ema_m(epoch, args)
-        # reset phi
-            mmc = loss_fn.confidence.max(dim=1)[0].mean()
-
-        acc_test = test(model, model_vanilla, test_loader, args, epoch, logger)
+        acc_test = test(model, test_loader, args, epoch, logger)
 
 
         with open(os.path.join(args.exp_dir, f'result_target_domain={args.target_domain}.log'), 'a+') as f:
@@ -399,13 +389,11 @@ def train(train_loader, model ,loss_fn, loss_cont_fn,loss_domain_fn, optimizer, 
         cls_out, features_cont, pseudo_score_cont, partial_target_cont, domain_score_cont,domain_out, score_prot\
             = model(X_w, X_s, Y, args) # torch.Size([64, 7]) torch.Size([8320, 128]) torch.Size([8320, 7]) torch.Size([8320, 7]) torch.Size([64, 7])
         batch_size = cls_out.shape[0]
-
         pseudo_target_max, pseudo_target_cont = torch.max(pseudo_score_cont, dim=1)
         pseudo_target_cont = pseudo_target_cont.contiguous().view(-1, 1)
         _ , domain_target_cont = torch.max(domain_score_cont, dim=1)
         domain_target_cont = domain_target_cont.contiguous().view(-1, 1)
-        if start_upd_prot:
-            loss_fn.confidence_update(temp_un_conf=score_prot, batch_index=index, batchY=Y)
+        loss_fn.confidence_update(temp_un_conf=score_prot, batch_index=index, batchY=Y)
             # warm up ended
         if start_upd_prot:
             mask = torch.eq(pseudo_target_cont[:batch_size], pseudo_target_cont.T).float().cuda()
@@ -424,7 +412,7 @@ def train(train_loader, model ,loss_fn, loss_cont_fn,loss_domain_fn, optimizer, 
         # classification loss
         loss_cls = loss_fn(cls_out, index)
         loss_domain = loss_domain_fn(domain_out,domain_label)
-        loss = loss_cls + args.loss_weight * loss_cont + args.loss_weight * loss_domain
+        loss = args.loss_weight[0]* loss_cls + args.loss_weight[1] * loss_cont + args.loss_weight[2] * loss_domain
         loss_cls_log.update(loss_cls.item())
         loss_cont_log.update(loss_cont.item())
         loss_domain_log.update(loss_domain.item())
@@ -454,7 +442,7 @@ def train(train_loader, model ,loss_fn, loss_cont_fn,loss_domain_fn, optimizer, 
         tb_logger.log_value('Contrastive Loss', loss_cont_log.avg, epoch)
 
 
-def test(model, model_vanilla,test_loader, args, epoch, tb_logger):
+def test(model,test_loader, args, epoch, tb_logger):
     with torch.no_grad():
         print('==> Evaluation...')
         model.eval()
@@ -465,7 +453,7 @@ def test(model, model_vanilla,test_loader, args, epoch, tb_logger):
             images, labels = images.cuda(), labels.cuda()
             with torch.no_grad():
                 if args.not_pbd:
-                    outputs,_,_=model_vanilla(images)
+                    outputs,_,_=model(images)
                 else:
                     # output, _ = model(image)  # 在图像计算前加入
                     outputs = model(images, args, eval_only=True)#(256,3)
@@ -491,3 +479,48 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', best_file_nam
 
 if __name__ == '__main__':
     main()
+
+
+# no pr loss update seed=123   79.96  pr=0.5
+# no pr loss update seed=124  77.18
+# no pr loss update seed=125  75.85
+# no pr loss update seed=126  78.21
+# no pr loss update seed=127  75.64   avg=77.368
+# no pr loss update seed=123   77.87  pr=0.45
+# no pr loss update seed=124  73.58
+# no pr loss update seed=125  79.46
+# no pr loss update seed=126  79.46
+# no pr loss update seed=127  74.24   avg=76.922
+# no pr loss update seed=123   76.79  pr=0.4
+# no pr loss update seed=124  73.07
+# no pr loss update seed=125  79.38
+# no pr loss update seed=126  79.94
+# no pr loss update seed=127  74.6    avg=76.756
+# no pr loss update seed=123   75.98  pr=0.35
+# no pr loss update seed=124  72.28
+# no pr loss update seed=125  78.32
+# no pr loss update seed=126  79.39
+# no pr loss update seed=127  74.67     avg=76.128
+# no pr loss update seed=123   76.12  pr=0.3
+# no pr loss update seed=124  72.27
+# no pr loss update seed=125  77.15
+# no pr loss update seed=126  79.21
+# no pr loss update seed=127  74.22     avg=75.794
+# no pr loss update seed=123   75.03  pr=0.25
+# no pr loss update seed=124   72.92
+# no pr loss update seed=125  79.41
+# no pr loss update seed=126  79.07
+# no pr loss update seed=127  74.41     avg=76.168
+# no pr loss update seed=123   73.19  pr=0.2
+# no pr loss update seed=124  73.47
+# no pr loss update seed=125  78.96
+# no pr loss update seed=126
+# no pr loss update seed=127       avg=
+
+
+
+# continue 80.72
+
+
+
+

@@ -1,6 +1,8 @@
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+import numpy as np
 
 class partial_loss(nn.Module):
     def __init__(self, confidence, conf_ema_m=0.99):
@@ -8,6 +10,8 @@ class partial_loss(nn.Module):
         self.confidence = confidence
         self.init_conf = confidence.detach()
         self.conf_ema_m = conf_ema_m
+        self.plt_record = []
+        self.r_iter = 0
 
     def set_conf_ema_m(self, epoch, args):
         start = args.conf_ema_range[0]
@@ -26,8 +30,29 @@ class partial_loss(nn.Module):
             pseudo_label = F.one_hot(prot_pred, batchY.shape[1]).float().cuda().detach()
             self.confidence[batch_index, :] = self.conf_ema_m * self.confidence[batch_index, :]\
                  + (1 - self.conf_ema_m) * pseudo_label
+            n_confidence = self.confidence.argmax(1).clone().detach().cpu().numpy()
+            nums, _ = np.histogram(n_confidence, bins=3, range=(-0.1, 2.1))
+            nums = nums/np.sum(nums)
+            print(nums)
+            if self.r_iter%10==0:
+                self.plt_record.append(nums)
+                l = len(self.plt_record)
+                x = np.arange(l)
+            if self.r_iter%100==0:
+                for i in range(len(nums)):
+                    y = [self.plt_record[_][i] for _ in range(l)]
+                    plt.plot(x,y,"--",label=f"label={i}")
+                plt.savefig(f"./figure/{l}.png")
+            self.r_iter+=1
         return None
 
+def reduce_sum(nums):
+    results = []
+    t = 0
+    for i in nums:
+        t += i
+        results.append(t)
+    return results
 class SupConLoss(nn.Module):
     """Following Supervised Contrastive Learning: 
         https://arxiv.org/pdf/2004.11362.pdf."""

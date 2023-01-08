@@ -46,7 +46,7 @@ class DANN(nn.Module):
 
 class SupConDANN(nn.Module):
     """backbone + projection head"""
-    def __init__(self, name, head='mlp', feat_dim=128, num_class=7, domain_class=3, pretrained=False):
+    def __init__(self,  head='mlp', feat_dim=128, num_class=7, domain_class=3, pretrained=False):
         super(SupConDANN, self).__init__()
         model_fun, dim_in = DANN, 64
         self.encoder = model_fun()
@@ -75,4 +75,4 @@ class SupConDANN(nn.Module):
         feat_c = self.head(feat)
         logits = self.fc(feat)
         feat_d = self.domain_head(feat.detach())
-        return logits, F.normalize(feat_c, dim=1), F.normalize(feat_d,dim=1)
+        return logits, F.normalize(feat_c, p=2, dim=1), F.normalize(feat_d,p=2, dim=1)
