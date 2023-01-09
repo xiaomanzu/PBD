@@ -1,7 +1,7 @@
 from torch.utils import data
 import torch
 import torch.optim as optim
-from .utils_algo import generate_uniform_cv_candidate_labels
+from utils_algo import generate_uniform_cv_candidate_labels
 import tqdm
 import argparse
 from torch.utils.data import Dataset, DataLoader
@@ -9,11 +9,12 @@ import numpy as np
 import os
 import torch.nn.functional as F
 # from dataloader import seed_dataset as mydataset
-from .seed_dataset import Mydataset
+from seed_dataset import Mydataset
 # mydataset.Mydataset
 import torchvision
 import matplotlib.pyplot as plt
 import random
+from EEGaugment import *
 from PIL import Image
 from torchvision.transforms import transforms
 from sklearn.model_selection import train_test_split
@@ -41,79 +42,63 @@ class SEED_Augmentention(Dataset):
         # user-defined label (partial labels)
         self.true_labels = true_labels
 
+    # def normal(self, input, std, p):
+    #     input_shape = input.size()
+    #     if random.random() < p:
+    #         noise = torch.normal(mean=0., std=std, size=input_shape).to(input.device)
+    #     else:
+    #         noise = 0
+    #     return input + noise
+    #
+    # def cutout(self, input, p):
+    #     if random.random() < p:
+    #         shape_0 = input.shape[0]
+    #         begin = random.random()
+    #         end = random.random() * shape_0 * 0.1 + begin
+    #         begin, end = int(min(begin, end)), int(max(begin, end))
+    #         begin, end = max(shape_0 * begin, 0), min(shape_0 * end, shape_0 - 1)
+    #         new_input = input.clone()
+    #         new_input[begin:end] = 0
+    #         input = new_input
+    #     return input
+    #
+    # def cross(self, input, p):
+    #     if random.random() < p:
+    #         for i in range(100):
+    #             shape_0 = input.shape[0]
+    #             e = list(range(0, shape_0))
+    #             begin, end = random.sample(e, 2)
+    #             new_input = input.clone()
+    #             new_input[begin] = input[end]
+    #             new_input[end] = input[begin]
+    #             input = new_input
+    #     return input
+    #
+    # def shift(self, input, p):
+    #     if random.random() < p:
+    #         m = 1
+    #         if random.random() > 0.5:
+    #             m = -1 * m
+    #         l = int(random.random() * 0.2 * input.shape[0])
+    #         input = torch.roll(input, l * m, 1)
+    #     return input
 
-    def normal(self, input, std, p):
-        input_shape = input.size()
-        if random.random()< p:
-            noise = torch.normal(mean=0., std=std, size=input_shape)
-        else:
-            noise = 0
-        return input + noise
-
-    def cutout(self,input,p):
-        if random.random()<p:
-            shape_0 = input.shape[0]
-            begin = random.random()
-            end = random.random() * shape_0 * 0.1 + begin
-            begin,end = int(min(begin,end)),int(max(begin,end))
-            begin,end = max(shape_0*begin,0),min(shape_0*end,shape_0-1)
-            new_input = input.clone()
-            new_input[begin:end] = 0
-            input = new_input
-        return input
-
-    def cross(self,input,p):
-        if random.random()<p:
-            for i in range(100):
-                shape_0 = input.shape[0]
-                e = list(range(0, shape_0))
-                begin,end=random.sample(e,2)
-                new_input = input.clone()
-                new_input[begin] = input[end]
-                new_input[end] = input[begin]
-                input = new_input
-        return input
-
-    def shift(self,input,p):
-        if random.random()<p:
-            m = 1
-            if random.random()>0.5:
-                m = -1 * m
-            l = int(random.random()*0.2*input.shape[0])
-            input = torch.roll(input,l*m,1)
-        return input
-
-    def compose(self,input,p_list):
-        input = self.normal(input,0.2,p_list[0])
-        input = self.cutout(input,p_list[1])
-        input=self.cross(input,p_list[2])
-        # input = self.shift(input,p_list[2])
+    def compose(self, input, p_list):
+        input = normal(input, 0.2, p_list[0])
+        input = mult_f(input, p_list[1])
+        input = cutout(input, p_list[2])
+        input = cross(input, p_list[3])
+        input = freq_mod_f(input, p_list[4])
+        input = torch.FloatTensor(input)
         return input
 
     def __len__(self):
         return len(self.true_labels)
 
     def __getitem__(self, index):
-        image_path = self.images[index]
-
-        # Sliding window
-        # sw_concat = []  # to store concatenated or averaged sliding window outputs
-        # for i in range(n_windows):
-        #     st = i
-        #     end = block1.shape[1] - n_windows + i + 1
-        #     block2 = block1[:, st:end, :]
-
-        # smote
-        # from imblearn.over_sampling import SMOTE
-        # sm = SMOTE(random_state=42)
-        # each_image_w = self.images
-        # x_train_smote_raw,  self.given_label_matrix= sm.fit_resample(self.images, self.given_label_matrix)
-        # each_image_s = x_train_smote_raw
-
-
-
-        each_image_w = self.compose(image_path,[0.2,0.2,0.2])  # args.weak_aug[62,5]
-        each_image_s = self.compose(image_path,[0.8,0.8,0.8]) # args.strong_aug
+        image = self.images[index]
+        each_image_w = self.compose(image, [0.1, 0.1, 0.1, 0.1, 0.1])  # args.weak_aug[62,5]
+        each_image_s = self.compose(image, [0.3, 0.3, 0.3, 0.3, 0.3])  # args.strong_aug
         # each_image_w=self.images[index]
         # each_image_s = self.images[index]
         each_label = self.given_label_matrix[index]
@@ -123,7 +108,7 @@ class SEED_Augmentention(Dataset):
         return each_image_w, each_image_s, each_label, each_true_label, index, domain_label
 
 
-def get_SEED_domain( target_domain,partial_rate, batch_size, verbose=False):  # target_domain: str,
+def get_SEED_domain(target_domain, partial_rate, batch_size, verbose=False):  # target_domain: str,
     # 信息
     model_name = "mixer_15"
     ex_name = "ex17"
@@ -132,25 +117,13 @@ def get_SEED_domain( target_domain,partial_rate, batch_size, verbose=False):  # 
     mode_index = ['band', 'time']
     total_sample = 15  # 15
     # sample_path='C:/Users/12397/Desktop/flm/SEED/'
-    sample_path = 'E:/fanfanya/output/DE_LDS/time_1/'
-    # 生成结果存储文件夹
-    # result_root_path = root_path + "/result/test/%s/cs_%s/" % (args.dataset, ex_name)
-    # if not os.path.exists(result_root_path):
-    #     os.makedirs(result_root_path)
-
-    # for feature in feature_index:
-    #     for mode in mode_index:
-    #         sample_path = root_path + "data/seed/leave one subject out_%s/" % (mode)
-    #         # 测试 total_sample次
-    # torch.cuda.empty_cache()
+    sample_path = 'G:/fanfanya/meiyun/time_1/'
     i = int(target_domain)
-    # test_sample = np.load(sample_path + '%s/' % (feature) + 'person_%d %s.npy' % (i, feature))  # 第i个人为测试样本
     test_sample = np.load(sample_path + "session_0/person_%d DE.npy" % (i))
     # 测试样本数据准备
     e_label = np.load(sample_path + 'label.npy')
     test_label = e_label
     person_test = np.ones(len(test_label)) * i
-    print(person_test.shape,test_sample.shape,test_label.shape)
     # 训练样本数据准备
     index = [k for k in range(total_sample)]
     del index[i]  # 删除变量i,防止重复
@@ -180,8 +153,8 @@ def get_SEED_domain( target_domain,partial_rate, batch_size, verbose=False):  # 
     # 47516,3394
     # RuntimeError: Given groups=1, weight of size [64, 3, 7, 7], expected input[1, 16, 62, 5] to have 3 channels, but got 16 channels instead
     # 训练
-    train_data = Mydataset(train_sample, train_label, person_train,train=True)
-    test_data = Mydataset(test_sample, test_label, person_test,train=False)
+    train_data = Mydataset(train_sample, train_label, person_train, train=True)
+    test_data = Mydataset(test_sample, test_label, person_test, train=False)
     labels = []
     domains = []
     data = []
@@ -217,35 +190,35 @@ def get_SEED_domain( target_domain,partial_rate, batch_size, verbose=False):  # 
     train_sampler = torch.utils.data.distributed.DistributedSampler(partial_matrix_dataset)
     partial_matrix_train_loader = torch.utils.data.DataLoader(dataset=partial_matrix_dataset,
                                                               batch_size=batch_size,
-                                                              pin_memory=True,
+                                                              pin_memory=False,
                                                               sampler=train_sampler,
-                                                              drop_last=True)  # num_workers=4,
+                                                              drop_last=True,
+                                                              num_workers=8)  # num_workers=4,
     test_dataloader = torch.utils.data.DataLoader(dataset=test_data,
                                                   batch_size=batch_size,
-                                                  pin_memory=True,
+                                                  pin_memory=False,
                                                   shuffle=False,
-                                                  drop_last=False)  # num_workers=4,
+                                                  drop_last=False,
+                                                  num_workers=8)  # num_workers=4,
     return partial_matrix_train_loader, partialY, train_sampler, test_dataloader
 
-def get_SEED( target_domain, batch_size, verbose=False):  # target_domain: str,
 
+def get_SEED(target_domain, batch_size, verbose=False):  # target_domain: str,
     total_sample = 15  # 15
-    sample_path = 'E:/fanfanya/output/DE_LDS/time_1/'
+    sample_path = 'G:/fanfanya/meiyun/time_1/'
     i = int(target_domain)
     test_sample = np.load(sample_path + "session_0/person_%d DE.npy" % (i))
     # 测试样本数据准备
     e_label = np.load(sample_path + 'label.npy')
     test_label = e_label
     person_test = np.ones(len(test_label)) * i
-    print(person_test.shape,test_sample.shape,test_label.shape)
+    print(person_test.shape, test_sample.shape, test_label.shape)
     # 训练样本数据准备
     index = [k for k in range(total_sample)]
     del index[i]  # 删除变量i,防止重复
     print('train index:', index)
     for k, j in enumerate(index):
-
         if k == 0:
-
             train_sample = np.load(sample_path + "session_0/person_%d DE.npy" % (j),
                                    allow_pickle=True)
             train_label = test_label
@@ -257,15 +230,14 @@ def get_SEED( target_domain, batch_size, verbose=False):  # target_domain: str,
             train_label = np.append(train_label, elabel)
             person_train = np.append(person_train, np.ones([len(elabel)], dtype=int) * k)
 
-
     print(person_train.max(0))
     train_sample = train_sample.reshape(train_sample.shape[0], 62, -1)
     test_sample = test_sample.reshape(test_sample.shape[0], 62, -1)
     # 47516,3394
     # RuntimeError: Given groups=1, weight of size [64, 3, 7, 7], expected input[1, 16, 62, 5] to have 3 channels, but got 16 channels instead
     # 训练
-    train_data = Mydataset(train_sample, train_label, person_train,train=True)
-    test_data = Mydataset(test_sample, test_label, person_test,train=False)
+    train_data = Mydataset(train_sample, train_label, person_train, train=True)
+    test_data = Mydataset(test_sample, test_label, person_test, train=False)
     labels = []
     domains = []
     data = []
@@ -282,13 +254,12 @@ def get_SEED( target_domain, batch_size, verbose=False):  # target_domain: str,
     domains = torch.LongTensor(domains)
     labels = torch.LongTensor(labels)  # - 1
 
-
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_data)
     partial_matrix_train_loader = torch.utils.data.DataLoader(dataset=train_data,
                                                               batch_size=batch_size,
                                                               pin_memory=True,
                                                               shuffle=True,
-                                                             # sampler=train_sampler,
+                                                              # sampler=train_sampler,
                                                               drop_last=True)  # num_workers=4,
     test_dataloader = torch.utils.data.DataLoader(dataset=test_data,
                                                   batch_size=batch_size,
